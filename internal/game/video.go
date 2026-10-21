@@ -4,24 +4,24 @@ package game
 // a multicolour bitmap with eight sprites; above TextBandEnd the raster
 // interrupt switches multicolour off so the typed text reads in hires.
 type VIC struct {
-	SpriteX                 [8]int // 9 bits, as $D000/$D010
-	SpriteY                 [8]uint8
-	SpriteColor             [8]uint8
-	SpriteEnable            uint8 // a bit per sprite
-	SpriteMulti             uint8
-	SpriteExpandX           uint8
-	SpriteExpandY           uint8
-	SpriteBehind            uint8 // $D01B: sprite behind the bitmap's foreground
-	SpriteMC1, SpriteMC2    uint8 // $D025, $D026
-	Border, Background      uint8
-	Control1, Control2      uint8 // $D011, $D016
-	TextBand                bool  // the IRQ's split is on this frame
-	TextBandEnd             int   // first raster line shown multicolour again
-	BandSprite              int   // sprite borrowed as the text cursor, -1 none
-	BandSpriteX             int
-	BandSpriteY             uint8
-	BandSpritePtr           uint8
-	BandSpriteColor         uint8
+	SpriteX              [8]int // 9 bits, as $D000/$D010
+	SpriteY              [8]uint8
+	SpriteColor          [8]uint8
+	SpriteEnable         uint8 // a bit per sprite
+	SpriteMulti          uint8
+	SpriteExpandX        uint8
+	SpriteExpandY        uint8
+	SpriteBehind         uint8 // $D01B: sprite behind the bitmap's foreground
+	SpriteMC1, SpriteMC2 uint8 // $D025, $D026
+	Border, Background   uint8
+	Control1, Control2   uint8 // $D011, $D016
+	TextBand             bool  // the IRQ's split is on this frame
+	TextBandEnd          int   // first raster line shown multicolour again
+	BandSprite           int   // sprite borrowed as the text cursor, -1 none
+	BandSpriteX          int
+	BandSpriteY          uint8
+	BandSpritePtr        uint8
+	BandSpriteColor      uint8
 }
 
 // screen layout of the visible window
@@ -102,8 +102,12 @@ func (g *Game) spritesLine(raster int, line []uint8, fg []bool) {
 		}
 		x0, y0 := v.SpriteX[s], int(v.SpriteY[s])
 		ptr, color := g.spritePtr[s], v.SpriteColor[s]
+		mc := v.SpriteMulti&(1<<s) != 0
+		behind := v.SpriteBehind&(1<<s) != 0
 		if v.TextBand && s == v.BandSprite && raster < v.TextBandEnd {
+			// $0759: the cursor is hires and in front ($D01C/$D01B bits cleared)
 			x0, y0, ptr, color = v.BandSpriteX, int(v.BandSpriteY), v.BandSpritePtr, v.BandSpriteColor
+			mc, behind = false, false
 		}
 		ye := 1 + int(v.SpriteExpandY>>s&1)
 		row := (raster - y0) / ye
@@ -111,8 +115,6 @@ func (g *Game) spritesLine(raster int, line []uint8, fg []bool) {
 			continue
 		}
 		xe := 1 + int(v.SpriteExpandX>>s&1)
-		mc := v.SpriteMulti&(1<<s) != 0
-		behind := v.SpriteBehind&(1<<s) != 0
 		data := g.spriteImage(ptr)
 		cols := [4]uint8{0, v.SpriteMC1 & 15, color & 15, v.SpriteMC2 & 15}
 		for px := 0; px < 24; px++ {

@@ -9,20 +9,20 @@ type Game struct {
 	state // state_gen.go: every variable and table, named
 
 	vic       VIC
-	bitmap    [8000]byte  // $6000
-	screen    [1000]byte  // $5C00: two colours per cell
-	colorRAM  [1000]byte  // $D800
-	spritePtr [8]uint8    // $5FF8
+	bitmap    [8000]byte    // $6000
+	screen    [1000]byte    // $5C00: two colours per cell
+	colorRAM  [1000]byte    // $D800
+	spritePtr [8]uint8      // $5FF8
 	spriteMem [256][64]byte // sprite images in the $4000 bank, by pointer
 
 	sidRegs  [25]byte // the registers as last written
 	sidQueue []sidWrite
 
-	keys     [8]uint8 // keyboard matrix: per $DC00 column bit, the $DC01 rows (0 = pressed)
-	joystick uint8    // $DC00 low bits as read (0 = pressed)
+	typed    []uint8 // characters typed, not yet taken by the keyboard scan
+	joystick uint8   // $DC00 low bits as read (0 = pressed)
 
-	frames   chan struct{} // the host lets the logic run one frame
-	yielded  chan struct{} // the logic waits for the next frame
+	frames  chan struct{} // the host lets the logic run one frame
+	yielded chan struct{} // the logic waits for the next frame
 }
 
 type sidWrite struct{ reg, v byte }

@@ -1,7 +1,9 @@
-// Command lcpdata generates the game's state and data from the original
-// disk, once, into internal/game. The game then needs no disk.
+// Command lcpdata generates the game's state layout and the code that
+// loads its tables from the starting image into internal/game. It holds no
+// game data: the bytes come from data/ram.bin at run time, which
+// `lcp -import` unpacks from the player's disk.
 //
-//	go run ./cmd/lcpdata -d64 Little_Computer_People_1985_Activision.d64
+//	go run ./cmd/lcpdata
 //
 // sym/base.txt names every variable and table (ADDR LEN KIND NAME GOTYPE ; note).
 package main
@@ -17,8 +19,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"lcp/internal/disk"
 )
 
 type sym struct {
@@ -39,34 +39,21 @@ const (
 )
 
 func main() {
-	d64 := flag.String("d64", os.Getenv("LCP_D64"), "original disk image")
 	out := flag.String("out", "internal/game", "output package directory")
 	symFile := flag.String("sym", "cmd/lcpdata/sym/base.txt", "symbol table")
 	flag.Parse()
-	raw, err := os.ReadFile(*d64)
-	check(err)
-	prg, err := disk.File(raw, "COMPUTER PEOPLE")
-	check(err)
-	img, err := disk.Unpack(prg)
-	check(err)
 	syms := readSyms(*symFile)
-	m := img.RAM[:]
 
-	assets := filepath.Join(*out, "assets")
-	check(os.MkdirAll(assets, 0o755))
-	put := func(name string, b []byte) { check(os.WriteFile(filepath.Join(assets, name+".bin"), b, 0o644)) }
-	put("bitmap", m[bitmapBase:bitmapEnd])
-	put("screen", m[screenBase:screenBase+1000])
-	put("colorram", img.ColorRAM[:1000])
-	put("spritemem", m[bankBase:bankBase+0x4000])
-	put("resident", m[residentLo:residentHi])
-
-	var st, ini, res, unres, dat bytes.Buffer
+	var st, ini, res, unres, dat, load bytes.Buffer
 	for _, s := range syms {
 		switch s.kind {
 		case "field":
+			if s.addr < 0 {
+				fmt.Fprintf(&st, "\t%s %s // Go-only: %s\n", s.name, s.typ, s.note)
+				continue
+			}
 			fmt.Fprintf(&st, "\t%s %s // $%04X: %s\n", s.name, s.typ, s.addr, s.note)
-			fmt.Fprintf(&ini, "\tg.%s = %s\n", s.name, literal(s, m))
+			ini.WriteString(assign("g."+s.name, s, false))
 			if s.addr >= residentLo && s.addr+s.size <= residentHi {
 				p, u := residentCode(s)
 				res.WriteString(p)
@@ -81,29 +68,30 @@ func main() {
 				fmt.Fprintf(&dat, "// $%04X: %s\nconst %s = %d // index into %s\n\n", s.addr, s.note, s.name, s.addr-base, what)
 				continue
 			}
-			if strings.HasPrefix(s.typ, "[") && elem(s.typ) == "uint8" && s.size > 64 {
-				put(s.name, m[s.addr:s.addr+s.size])
-				fmt.Fprintf(&dat, "// $%04X: %s\n//\n//go:embed assets/%s.bin\nvar %s []byte\n\n", s.addr, s.note, s.name, s.name)
+			if s.typ == "[]byte" || strings.HasPrefix(s.typ, "[") && elem(s.typ) == "uint8" && s.size > 64 {
+				fmt.Fprintf(&dat, "// $%04X: %s\nvar %s []byte\n\n", s.addr, s.note, s.name)
+				fmt.Fprintf(&load, "\t%s = m[0x%04X:0x%04X]\n", s.name, s.addr, s.addr+s.size)
 				continue
 			}
-			fmt.Fprintf(&dat, "// $%04X: %s\nvar %s = %s\n\n", s.addr, s.note, s.name, literal(s, m))
+			typ := s.typ
+			if !strings.HasPrefix(typ, "[") {
+				typ = "int"
+			}
+			fmt.Fprintf(&dat, "// $%04X: %s\nvar %s %s\n\n", s.addr, s.note, s.name, typ)
+			load.WriteString(assign(s.name, s, true))
 		}
 	}
 
 	gen(filepath.Join(*out, "state_gen.go"), fmt.Sprintf(`package game
 
-import _ "embed"
-
 // state is every variable the original keeps between routines.
 type state struct {
 %s}
 
-// initState sets every variable to its value in the starting image.
+// initState sets every variable to its value in the starting image
+// (data/ram.bin, see data.go).
 func (g *Game) initState() {
 %s}
-
-//go:embed assets/resident.bin
-var residentImage []byte
 
 // packResident writes the resident block ($0340-$043F) in the original
 // layout, as a real LCP disk keeps it; bytes no field covers come from base.
@@ -119,27 +107,51 @@ func (g *Game) unpackResident(b []byte) {
 
 	gen(filepath.Join(*out, "data_gen.go"), fmt.Sprintf(`package game
 
-import _ "embed"
+// The starting picture and sprite bank, set by loadData.
+var startBitmap, startScreen, startSpriteMem []byte
 
-//go:embed assets/bitmap.bin
-var startBitmap []byte
+// loadData sets every table from the starting image m (data/ram.bin, the
+// 64K RAM at game entry that -import unpacks from the disk).
+func loadData(m []byte) {
+	startBitmap = m[0x%04X:0x%04X]
+	startScreen = m[0x%04X:0x%04X]
+	startSpriteMem = m[0x%04X:0x%04X] // sprite images and fonts: the $4000 bank, 64 bytes per pointer
+%s}
 
-//go:embed assets/screen.bin
-var startScreen []byte
+%s`, bitmapBase, bitmapEnd, screenBase, screenBase+1000, bankBase, bankBase+0x4000, load.String(), dat.String()))
+}
 
-//go:embed assets/colorram.bin
-var startColorRAM []byte
-
-// sprite images and fonts: the whole $4000 bank, 64 bytes per pointer
-//
-//go:embed assets/spritemem.bin
-var startSpriteMem []byte
-
-%s`, dat.String()))
+// assign is the code setting v (a field when field, else an int or array
+// package variable) from the starting image at s.addr.
+func assign(v string, s sym, pkg bool) string {
+	e := elem(s.typ)
+	read := func(at string) string {
+		switch e {
+		case "uint16":
+			return "ramWord(" + at + ")"
+		case "int8":
+			return "int8(ramByte(" + at + "))"
+		}
+		return "ramByte(" + at + ")"
+	}
+	if !strings.HasPrefix(s.typ, "[") {
+		x := read(fmt.Sprintf("0x%04X", s.addr))
+		if pkg {
+			x = "int(" + x + ")"
+		} else if e != "uint8" && e != "uint16" && e != "int8" {
+			x = e + "(" + x + ")"
+		}
+		return fmt.Sprintf("\t%s = %s\n", v, x)
+	}
+	x := read(fmt.Sprintf("0x%04X+%d*i", s.addr, width(e)))
+	if e != "uint8" && e != "uint16" && e != "int8" {
+		x = e + "(" + x + ")"
+	}
+	return fmt.Sprintf("\tfor i := range %s {\n\t\t%s[i] = %s\n\t}\n", v, v, x)
 }
 
 func gen(path, src string) {
-	src = "// Code generated by cmd/lcpdata from the original disk. DO NOT EDIT.\n\n" + src
+	src = "// Code generated by cmd/lcpdata from the symbol table. DO NOT EDIT.\n\n" + src
 	b, err := format.Source([]byte(src))
 	if err != nil {
 		os.WriteFile(path, []byte(src), 0o644)
@@ -157,8 +169,11 @@ func elem(t string) string {
 }
 
 func width(t string) int {
-	if t == "uint16" {
+	switch t {
+	case "uint16":
 		return 2
+	case "uint32":
+		return 4
 	}
 	return 1
 }
@@ -170,32 +185,6 @@ func count(t string) int {
 	n, err := strconv.Atoi(t[1:strings.IndexByte(t, ']')])
 	check(err)
 	return n
-}
-
-func value(t string, m []byte, a int) string {
-	switch t {
-	case "uint16":
-		return fmt.Sprintf("0x%04X", int(m[a])|int(m[a+1])<<8)
-	case "int8":
-		return strconv.Itoa(int(int8(m[a])))
-	}
-	return fmt.Sprintf("0x%02X", m[a])
-}
-
-func literal(s sym, m []byte) string {
-	e := elem(s.typ)
-	if !strings.HasPrefix(s.typ, "[") {
-		return value(e, m, s.addr)
-	}
-	var b strings.Builder
-	b.WriteString(s.typ + "{")
-	for i := 0; i < count(s.typ); i++ {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(value(e, m, s.addr+i*width(e)))
-	}
-	return b.String() + "}"
 }
 
 // residentCode copies a field to and from the resident block b.
@@ -247,8 +236,12 @@ func readSyms(path string) []sym {
 		if len(w) < 5 {
 			log.Fatalf("bad symbol line: %s", line)
 		}
-		a, err := strconv.ParseUint(w[0], 16, 16)
-		check(err)
+		a := int64(-1) // "----": Go-only field, no address, no initial value
+		if w[0] != "----" {
+			v, err := strconv.ParseUint(w[0], 16, 16)
+			check(err)
+			a = int64(v)
+		}
 		n, err := strconv.Atoi(w[1])
 		check(err)
 		s := sym{int(a), n, w[2], w[3], w[4], strings.TrimSpace(note)}
@@ -256,7 +249,7 @@ func readSyms(path string) []sym {
 			continue
 		}
 		seen[s.name] = true
-		if s.kind == "field" || s.kind == "const" || s.kind == "gfx" {
+		if (s.kind == "field" || s.kind == "const" || s.kind == "gfx") && s.addr >= 0 && s.typ != "[]byte" {
 			if want := count(s.typ) * width(elem(s.typ)); want != s.size {
 				log.Printf("%s: size %d, type %s is %d bytes", s.name, s.size, s.typ, want)
 			}
@@ -264,6 +257,31 @@ func readSyms(path string) []sym {
 		out = append(out, s)
 	}
 	check(sc.Err())
+	return dropContained(out)
+}
+
+// dropContained removes a field whose bytes lie inside a larger (or
+// earlier, equal) field: the code indexes the container instead, so each
+// byte lives in one place.
+func dropContained(syms []sym) []sym {
+	var out []sym
+	for i, s := range syms {
+		in := -1
+		if s.kind == "field" && s.addr >= 0 {
+			for j, c := range syms {
+				if j != i && c.kind == "field" && c.addr >= 0 && c.addr <= s.addr && s.addr+s.size <= c.addr+c.size &&
+					(c.size > s.size || j < i) {
+					in = j
+					break
+				}
+			}
+		}
+		if in >= 0 {
+			log.Printf("dropped %s: inside %s[%d]", s.name, syms[in].name, s.addr-syms[in].addr)
+			continue
+		}
+		out = append(out, s)
+	}
 	return out
 }
 

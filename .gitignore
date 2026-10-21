@@ -1,0 +1,7 @@
+# game data: the player imports their own copy (lcp -import SRC -data data)
+/data/
+/save/
+internal/game/assets/
+# traces of the original's music, compared by music_test
+internal/game/testdata/
+.DS_Store

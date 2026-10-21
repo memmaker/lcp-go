@@ -10,6 +10,7 @@ type CPU struct {
 	Mem           [65536]byte
 	Cycles        uint64
 	OnWrite       func(addr uint16, v byte) // optional
+	OnRead        func(addr uint16)         // optional, data reads and fetches
 	// IORead/IOWrite, when set, take $D000-$DFFF while $01 maps I/O in.
 	IORead  func(addr uint16) byte
 	IOWrite func(addr uint16, v byte)
@@ -31,6 +32,9 @@ const (
 )
 
 func (c *CPU) rd(a uint16) byte {
+	if c.OnRead != nil {
+		c.OnRead(a)
+	}
 	if c.io(a) {
 		return c.IORead(a)
 	}
