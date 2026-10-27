@@ -38,3 +38,5 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )
+
+replace github.com/gogpu/gogpu => ../goplay/third_party/gogpu // macOS fullscreen fixes, see goplay/third_party/README.md

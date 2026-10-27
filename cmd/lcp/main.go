@@ -98,6 +98,7 @@ func main() {
 	gpu.SetWindowSize(game.ScreenW**scale, game.ScreenH**scale)
 	gpu.SetWindowTitle("Little Computer People")
 	gpu.SetTPS(fps)
+	gpu.SetFullscreen(os.Getenv("GOPLAY_FULLSCREEN") == "1") // goplay starts games fullscreen
 	if err := gpu.RunGame(h); err != nil {
 		log.Fatal(err)
 	}
